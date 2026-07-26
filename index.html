@@ -153,6 +153,7 @@ input[type=range]:focus-visible{outline:2px solid var(--rec);outline-offset:3px;
 .pad.hit .lbl,.pad.hit .num,.pad.hit .key{color:rgba(26,23,18,.8)}
 .pad.sel{box-shadow:0 4px 0 #26241f, 0 6px 10px rgba(0,0,0,.45), inset 0 0 0 2px var(--amber)}
 .pad:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
+.pad.drop{outline:2px dashed var(--grn);outline-offset:2px;background:linear-gradient(180deg,#4f6350,#39463a)}
 .pad .bar{position:absolute;left:0;bottom:0;height:2px;background:var(--amber);width:0}
 .pad .loopdot{position:absolute;bottom:5px;right:6px;width:5px;height:5px;border-radius:50%;
   background:var(--grn);box-shadow:0 0 6px var(--grn);display:none}
@@ -281,6 +282,16 @@ input[type=range]:focus-visible{outline:2px solid var(--rec);outline-offset:3px;
       </div>
 
       <div class="sect">
+        <span class="silk">Sample in</span>
+        <div class="row">
+          <button class="tog" id="bMic">● Record mic</button>
+          <button class="tog" id="bUp">Upload audio</button>
+          <input type="file" id="audioIn" accept="audio/*,.opus,.m4a,.ogg,.aac,.flac" multiple hidden>
+          <span class="kv" id="micTime"></span>
+        </div>
+      </div>
+
+      <div class="sect">
         <span class="silk">Lock chop to the grid</span>
         <div class="row">
           <button class="tog" id="fit1">1 bar</button>
@@ -296,6 +307,7 @@ input[type=range]:focus-visible{outline:2px solid var(--rec);outline-offset:3px;
         <div class="row">
           <button class="tog" id="chop8">Chop ×8</button>
           <button class="tog" id="chop16">Chop ×16</button>
+          <button class="tog" id="sliceHits">Slice at hits</button>
           <button class="tog" id="spreadKeys">Across keys</button>
         </div>
       </div>
@@ -373,7 +385,8 @@ input[type=range]:focus-visible{outline:2px solid var(--rec);outline-offset:3px;
 
     <p class="hint">
       <b>Keys</b> 1234 / QWER / ASDF / ZXCV play pads 13–16 down to 1–4 · <b>Space</b> play-stop · <b>Esc</b> silence everything<br>
-      <b>Drag the waveform</b> to chop · <b>Chop ×16</b> lays the slices across the bank · <b>Across keys</b> lays the same chop out chromatically · <b>Rec + Play</b> to drum hits in
+      <b>Drag the waveform</b> to chop · <b>Chop ×16</b> lays the slices across the bank · <b>Across keys</b> lays the same chop out chromatically · <b>Rec + Play</b> to drum hits in<br>
+      <b>Drop an audio file straight onto a pad</b> — voice notes, field recordings, anything · <b>Slice at hits</b> cuts it at the transients
     </p>
   </div>
 </div>
@@ -400,7 +413,7 @@ function audio(){
 const NBANK = 4, NPADS = NBANK*16;
 function blankPad(){
   return { buffer:null, _rev:null, title:"", artist:"", art:"", spotify:"", drum:false,
-           src:"", kit:"", voice:"",
+           src:"", kit:"", voice:"", blob:null,
            start:0, end:0, pitch:0, rate:1, level:0.8, attack:0.002, decay:0,
            reverse:false, hold:false, loop:false, mono:true,
            steps:new Array(16).fill(false), loading:false, voices:[] };
@@ -821,6 +834,13 @@ function buildPads(){
       if(pads[p].loop && pads[p].voices.length){ stopPad(p); sel = p; syncPanel(); drawWave(); drawPads(); return; }
       sel = p; syncPanel(); drawWave(); drawPads(); hit(p);
     });
+    el.addEventListener("dragover", ev => { ev.preventDefault(); el.classList.add("drop"); });
+    el.addEventListener("dragleave", () => el.classList.remove("drop"));
+    el.addEventListener("drop", ev => {
+      ev.preventDefault(); el.classList.remove("drop");
+      const fs = audioFiles(ev.dataTransfer && ev.dataTransfer.files);
+      if(fs.length) filesToPads(fs, idx(slot));
+    });
     el.addEventListener("pointerup",   () => { const p = idx(slot); if(pads[p].hold && !pads[p].loop) stopPad(p); });
     el.addEventListener("pointerleave",() => { const p = idx(slot); if(pads[p].hold && !pads[p].loop) stopPad(p); });
     padsEl.appendChild(el);
@@ -962,7 +982,7 @@ $("#fitOff").addEventListener("click", () => { pads[sel].rate = 1; syncPanel(); 
 function snapshot(p){
   const s = pads[p];
   return { buffer:s.buffer, title:s.title, artist:s.artist, art:s.art, spotify:s.spotify,
-           drum:s.drum, src:s.src, kit:s.kit, voice:s.voice,
+           drum:s.drum, src:s.src, kit:s.kit, voice:s.voice, blob:s.blob,
            start:s.start, end:s.end, pitch:s.pitch, rate:s.rate,
            level:s.level, attack:s.attack, decay:s.decay };
 }
@@ -1184,6 +1204,202 @@ addEventListener("keyup", e => {
 });
 
 /* ============================================================
+   SAMPLE IN — mic, file upload, drag-drop, transient slicing
+   ============================================================ */
+const AUDIO_RE = /\.(mp3|wav|m4a|mp4|ogg|opus|oga|aac|flac|webm|aiff?|caf|3gp)$/i;
+function audioFiles(list){
+  return [...(list||[])].filter(f => (f.type && f.type.indexOf("audio") === 0) || AUDIO_RE.test(f.name));
+}
+
+function autoTrim(pad){
+  const d = pad.buffer.getChannelData(0), sr = pad.buffer.sampleRate;
+  let peak = 0;
+  for(let i=0;i<d.length;i+=8){ const v = Math.abs(d[i]); if(v > peak) peak = v; }
+  if(peak < 0.001) return;
+  const th = Math.max(0.004, peak*0.035);
+  let a = 0, b = d.length-1;
+  while(a < d.length && Math.abs(d[a]) < th) a++;
+  while(b > a && Math.abs(d[b]) < th) b--;
+  const st = Math.max(0, a/sr - 0.02), en = Math.min(pad.buffer.duration, b/sr + 0.06);
+  if(en - st > 0.05){ pad.start = st; pad.end = en; }
+}
+
+async function blobToPad(p, blob, title, artist, trim){
+  try{
+    const arr = await blob.arrayBuffer();
+    const ctx = audio();
+    const buf = await new Promise((ok,no) => {
+      const q = ctx.decodeAudioData(arr, ok, no);
+      if(q && q.then) q.then(ok,no);
+    });
+    const keep = pads[p].steps;
+    pads[p] = blankPad();
+    pads[p].steps  = keep;
+    pads[p].buffer = buf;
+    pads[p].blob   = blob;
+    pads[p].title  = (title || "Sample").slice(0, 40);
+    pads[p].artist = artist || "";
+    pads[p].end    = buf.duration;
+    if(trim) autoTrim(pads[p]);
+    sel = p;
+    drawPads(); syncPanel(); drawWave();
+    return true;
+  }catch(e){
+    setStatus("Couldn't decode that one. MP3, WAV, M4A and FLAC are safest — Safari can't read .opus.");
+    return false;
+  }
+}
+
+async function filesToPads(files, startPad){
+  let p = startPad, ok = 0;
+  for(const f of files){
+    if(p >= NPADS) break;
+    setStatus("Loading " + f.name + "…");
+    if(await blobToPad(p, f, f.name.replace(/\.[^.]+$/, ""), "Upload", true)) ok++;
+    p++;
+  }
+  if(ok){
+    resultsEl.classList.remove("open");
+    stopAll(); trigger(sel, 0, {audition:true, max:3});
+  }
+}
+
+$("#bUp").addEventListener("click", () => $("#audioIn").click());
+$("#audioIn").addEventListener("change", e => {
+  const fs = audioFiles(e.target.files);
+  e.target.value = "";
+  if(fs.length) filesToPads(fs, sel);
+});
+addEventListener("dragover", e => e.preventDefault());
+addEventListener("drop", e => {
+  e.preventDefault();
+  const fs = audioFiles(e.dataTransfer && e.dataTransfer.files);
+  if(fs.length) filesToPads(fs, sel);
+});
+
+/* ---------- microphone ---------- */
+let micStream = null, micRec = null, micChunks = [], micOn = false, micT0 = 0, micTick = null;
+if(!window.MediaRecorder || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+  $("#bMic").disabled = true;
+}
+
+async function startMic(){
+  try{
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio:{ echoCancellation:false, noiseSuppression:false, autoGainControl:false }
+    });
+  }catch(e){
+    setStatus("No mic access. Allow the microphone in your browser and try again.");
+    return;
+  }
+  audio();
+  micChunks = [];
+  const mime = pickMime();
+  const Rec = window.MediaRecorder;
+  try{
+    micRec = mime ? new Rec(micStream, {mimeType:mime}) : new Rec(micStream);
+  }catch(e){ micRec = new Rec(micStream); }
+  const type = micRec.mimeType || mime || "audio/webm";
+  micRec.ondataavailable = e => { if(e.data && e.data.size) micChunks.push(e.data); };
+  micRec.onstop = async () => {
+    if(micStream){ micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+    const blob = new Blob(micChunks, {type});
+    if(!blob.size){ setStatus("Nothing came through the mic."); return; }
+    const p = sel;
+    if(await blobToPad(p, blob, "Mic " + stamp(), "Recorded", true)){
+      resultsEl.classList.remove("open");
+      stopAll(); trigger(p, 0, {audition:true, max:3});
+    }
+  };
+  micRec.start();
+  micOn = true; micT0 = Date.now();
+  $("#bMic").classList.add("armed");
+  $("#bMic").textContent = "■ Stop mic";
+  micTick = setInterval(() => {
+    const s = (Date.now() - micT0)/1000;
+    $("#micTime").textContent = s.toFixed(1) + "s";
+  }, 100);
+}
+function stopMic(){
+  if(micRec && micRec.state !== "inactive") micRec.stop();
+  micOn = false;
+  clearInterval(micTick);
+  $("#micTime").textContent = "";
+  $("#bMic").classList.remove("armed");
+  $("#bMic").textContent = "● Record mic";
+}
+$("#bMic").addEventListener("click", () => micOn ? stopMic() : startMic());
+
+/* ---------- slice at transients ---------- */
+function detectOnsets(pad, maxN){
+  const buf = pad.buffer, sr = buf.sampleRate, d = buf.getChannelData(0);
+  const i0 = Math.floor(pad.start*sr), i1 = Math.min(d.length, Math.floor(pad.end*sr));
+  const win = Math.max(64, Math.floor(sr*0.01));
+  const n = Math.floor((i1-i0)/win);
+  if(n < 6) return [];
+
+  const env = new Float32Array(n);
+  for(let k=0;k<n;k++){
+    let sum = 0; const o = i0 + k*win;
+    for(let j=0;j<win;j++){ const v = d[o+j] || 0; sum += v*v; }
+    env[k] = Math.sqrt(sum/win);
+  }
+  const flux = new Float32Array(n);
+  for(let k=1;k<n;k++) flux[k] = Math.max(0, env[k] - env[k-1]);
+
+  let mean = 0;
+  for(let k=0;k<n;k++) mean += flux[k];
+  mean /= n;
+  let sd = 0;
+  for(let k=0;k<n;k++){ const x = flux[k]-mean; sd += x*x; }
+  sd = Math.sqrt(sd/n);
+
+  const th = mean + sd*1.1;
+  const gap = Math.max(2, Math.floor(0.08*sr/win));
+  const cands = [];
+  for(let k=1;k<n-1;k++){
+    if(flux[k] > th && flux[k] >= flux[k-1] && flux[k] >= flux[k+1]){
+      const prev = cands[cands.length-1];
+      if(prev && k - prev.k < gap){ if(flux[k] > prev.v) cands[cands.length-1] = {k, v:flux[k]}; }
+      else cands.push({k, v:flux[k]});
+    }
+  }
+  cands.sort((a,b) => b.v - a.v);
+  const top = cands.slice(0, maxN).sort((a,b) => a.k - b.k);
+  const times = top.map(c => pad.start + (c.k*win)/sr);
+  if(!times.length || times[0] - pad.start > 0.04) times.unshift(pad.start);
+  return times.slice(0, maxN);
+}
+
+$("#sliceHits").addEventListener("click", () => {
+  const s = snapshot(sel);
+  if(!s.buffer) return;
+  const hits = detectOnsets(pads[sel], 16);
+  if(hits.length < 2){ setStatus("Couldn't find clear hits in there. Try Chop ×16 instead."); return; }
+  stopAll();
+  for(let i=0;i<hits.length;i++){
+    const p = bank*16 + i;
+    const keep = pads[p].steps;
+    pads[p] = blankPad();
+    pads[p].steps = keep;
+    Object.assign(pads[p], s);
+    pads[p].title = s.title + " /" + (i+1);
+    pads[p].start = hits[i];
+    pads[p].end   = (i+1 < hits.length) ? hits[i+1] : s.end;
+    pads[p]._rev  = null;
+  }
+  for(let i=hits.length;i<16;i++){
+    const p = bank*16 + i;
+    const keep = pads[p].steps;
+    pads[p] = blankPad();
+    pads[p].steps = keep;
+  }
+  sel = bank*16;
+  drawPads(); syncPanel(); drawWave();
+  setStatus("Sliced into " + hits.length + " hits across bank " + "ABCD"[bank] + ".");
+});
+
+/* ============================================================
    RECORD & SAVE
    ============================================================ */
 const takesEl = $("#takes");
@@ -1329,22 +1545,50 @@ function stamp(){
   const d = new Date(), z = n => String(n).padStart(2,"0");
   return z(d.getHours()) + z(d.getMinutes()) + z(d.getSeconds());
 }
-function projectJSON(){
-  return {
-    app:"the-crate", version:2, bpm, swing,
-    master: master ? master.gain.value : 0.85,
-    pads: pads.map(p => {
-      if(!p.buffer) return p.steps.some(Boolean) ? {steps:p.steps.slice()} : null;
-      return { src:p.src, kit:p.kit, voice:p.voice, title:p.title, artist:p.artist,
-               spotify:p.spotify, art:p.art, drum:p.drum,
-               start:p.start, end:p.end, pitch:p.pitch, rate:p.rate, level:p.level,
-               attack:p.attack, decay:p.decay, reverse:p.reverse, hold:p.hold,
-               loop:p.loop, mono:p.mono, steps:p.steps.slice() };
-    })
-  };
+function blobToB64(blob){
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload  = () => res(String(r.result).split(",")[1] || "");
+    r.onerror = rej;
+    r.readAsDataURL(blob);
+  });
 }
-$("#bSave").addEventListener("click", () => {
-  const blob = new Blob([JSON.stringify(projectJSON(), null, 1)], {type:"application/json"});
+function b64ToBlob(b64, mime){
+  const bin = atob(b64), u = new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) u[i] = bin.charCodeAt(i);
+  return new Blob([u], {type: mime || "audio/webm"});
+}
+
+async function projectJSON(){
+  const out = { app:"the-crate", version:3, bpm, swing,
+                master: master ? master.gain.value : 0.85, pads:[], _embedded:0 };
+  for(let i=0;i<NPADS;i++){
+    const p = pads[i];
+    if(!p.buffer){ out.pads.push(p.steps.some(Boolean) ? {steps:p.steps.slice()} : null); continue; }
+    const e = { title:p.title, artist:p.artist, spotify:p.spotify, art:p.art, drum:p.drum,
+                start:p.start, end:p.end, pitch:p.pitch, rate:p.rate, level:p.level,
+                attack:p.attack, decay:p.decay, reverse:p.reverse, hold:p.hold,
+                loop:p.loop, mono:p.mono, steps:p.steps.slice() };
+    if(p.kit && p.voice){ e.kit = p.kit; e.voice = p.voice; }
+    else if(p.blob){
+      try{
+        e.mime = p.blob.type || "audio/webm";
+        e.data = await blobToB64(p.blob);
+        out._embedded += p.blob.size;
+      }catch(err){ e.src = p.src || ""; }
+    }
+    else if(p.src){ e.src = p.src; }
+    out.pads.push(e);
+  }
+  return out;
+}
+$("#bSave").addEventListener("click", async () => {
+  setStatus("Packing project…");
+  const proj = await projectJSON();
+  if(proj._embedded > 12e6) setStatus("Saved — but it's a big file, " + Math.round(proj._embedded/1e6) + " MB of embedded audio.");
+  else resultsEl.classList.remove("open");
+  delete proj._embedded;
+  const blob = new Blob([JSON.stringify(proj)], {type:"application/json"});
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = "the-crate-" + bpm + "bpm-" + stamp() + ".json";
@@ -1379,14 +1623,14 @@ async function loadProject(data){
   for(let p=0; p<NPADS; p++) pads[p] = blankPad();
 
   const list = data.pads || [];
-  let done = 0, need = list.filter(x => x && (x.kit || x.src)).length;
+  let done = 0, need = list.filter(x => x && (x.kit || x.src || x.data)).length;
 
   for(let p=0; p<Math.min(list.length, NPADS); p++){
     const d = list[p];
     if(!d) continue;
     const pad = pads[p];
     if(d.steps) pad.steps = d.steps.slice(0,16);
-    if(!d.kit && !d.src) continue;
+    if(!d.kit && !d.src && !d.data) continue;
 
     Object.assign(pad, {
       src:d.src||"", kit:d.kit||"", voice:d.voice||"", title:d.title||"", artist:d.artist||"",
@@ -1402,6 +1646,14 @@ async function loadProject(data){
         const spec = (KITS[d.kit]||[]).find(v => v[0] === d.voice);
         const len = spec ? spec[1] : 1;
         pad.buffer = await renderOffline(len, (oc,dd) => synth(oc, dd, d.kit, d.voice));
+      }else if(d.data){
+        const blob = b64ToBlob(d.data, d.mime);
+        pad.blob = blob;
+        const arr = await blob.arrayBuffer();
+        pad.buffer = await new Promise((ok,no) => {
+          const q = AC.decodeAudioData(arr, ok, no);
+          if(q && q.then) q.then(ok,no);
+        });
       }else if(d.src){
         const r = await fetch(d.src);
         if(!r.ok) throw new Error("http");
