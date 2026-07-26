@@ -173,10 +173,7 @@ input[type=range]:focus-visible{outline:2px solid var(--rec);outline-offset:3px;
 .tbtn .led{width:7px;height:7px;border-radius:50%;background:#6b6459;box-shadow:inset 0 1px 1px rgba(0,0,0,.5)}
 .tbtn[aria-pressed="true"] .led{background:var(--rec);box-shadow:0 0 8px var(--rec)}
 .tbtn.play[aria-pressed="true"] .led{background:var(--grn);box-shadow:0 0 8px var(--grn)}
-.tbtn.panic{color:#f6ece6;background:linear-gradient(180deg,#d2543d,#a83venue)}
-.tbtn.panic{background:linear-gradient(180deg,#d2543d,#a13career)}
-.tbtn.panic{background:linear-gradient(180deg,#d2543d,#9d3venue)}
-.tbtn.panic{background:linear-gradient(180deg,#d2543d,#a03a26);
+.tbtn.panic{color:#f6ece6;background:linear-gradient(180deg,#d2543d,#a03a26);
   box-shadow:0 3px 0 rgba(0,0,0,.42), inset 0 1px 0 rgba(255,255,255,.22)}
 .slider-cell{display:flex;align-items:center;gap:8px;min-width:190px;flex:1}
 .slider-cell .kv{min-width:54px;text-align:right}
@@ -195,6 +192,20 @@ input[type=range]:focus-visible{outline:2px solid var(--rec);outline-offset:3px;
 .step-nums{display:grid;grid-template-columns:repeat(16,1fr);gap:4px;margin-top:4px}
 .step-nums span{font-family:var(--mono);font-size:8px;color:var(--ink-soft);text-align:center}
 
+.save-row{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px}
+.takes{margin-top:9px;display:flex;flex-direction:column;gap:5px}
+.take{display:flex;align-items:center;gap:9px;padding:6px 9px;border-radius:2px;
+  background:rgba(0,0,0,.07);box-shadow:inset 0 1px 3px rgba(0,0,0,.2)}
+.take .nm{font-family:var(--mono);font-size:10px;color:var(--ink);flex:1;min-width:0;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.take audio{height:28px;max-width:190px}
+.take a{font-size:9px;letter-spacing:.16em;text-transform:uppercase;font-weight:800;
+  color:var(--ink);text-decoration:none;padding:6px 9px;border-radius:2px;
+  background:linear-gradient(180deg,var(--panel-hi),var(--panel-lo));
+  box-shadow:0 2px 0 rgba(0,0,0,.3), inset 0 1px 0 rgba(255,255,255,.55)}
+.take a:focus-visible{outline:2px solid var(--rec);outline-offset:2px}
+.tog.armed{color:#f6ece6;background:linear-gradient(180deg,#d2543d,#a03a26);
+  box-shadow:0 1px 0 rgba(0,0,0,.4), inset 0 1px 0 rgba(255,255,255,.2), 0 0 12px rgba(196,68,46,.6)}
 .hint{margin-top:13px;font-family:var(--mono);font-size:9.5px;line-height:1.75;
   color:var(--ink-soft);letter-spacing:.02em}
 .hint b{color:var(--ink);font-weight:700}
@@ -344,6 +355,22 @@ input[type=range]:focus-visible{outline:2px solid var(--rec);outline-offset:3px;
       <div class="step-nums" id="stepNums"></div>
     </div>
 
+    <div class="seq" style="margin-top:15px">
+      <span class="silk">Record &amp; save</span>
+      <div class="save-row">
+        <button class="tog" id="bCap">● Capture</button>
+        <button class="tog" id="bnc1">Bounce 1 bar</button>
+        <button class="tog" id="bnc2">2 bars</button>
+        <button class="tog" id="bnc4">4 bars</button>
+        <button class="tog" id="bnc8">8 bars</button>
+        <span style="margin-left:auto"></span>
+        <button class="tog" id="bSave">Save project</button>
+        <button class="tog" id="bLoad">Load project</button>
+        <input type="file" id="fileIn" accept=".json,application/json" hidden>
+      </div>
+      <div class="takes" id="takes"></div>
+    </div>
+
     <p class="hint">
       <b>Keys</b> 1234 / QWER / ASDF / ZXCV play pads 13–16 down to 1–4 · <b>Space</b> play-stop · <b>Esc</b> silence everything<br>
       <b>Drag the waveform</b> to chop · <b>Chop ×16</b> lays the slices across the bank · <b>Across keys</b> lays the same chop out chromatically · <b>Rec + Play</b> to drum hits in
@@ -373,6 +400,7 @@ function audio(){
 const NBANK = 4, NPADS = NBANK*16;
 function blankPad(){
   return { buffer:null, _rev:null, title:"", artist:"", art:"", spotify:"", drum:false,
+           src:"", kit:"", voice:"",
            start:0, end:0, pitch:0, rate:1, level:0.8, attack:0.002, decay:0,
            reverse:false, hold:false, loop:false, mono:true,
            steps:new Array(16).fill(false), loading:false, voices:[] };
@@ -383,15 +411,10 @@ let bank = 0, sel = 0;
 const idx = i => bank*16 + i;
 const $ = s => document.querySelector(s);
 
-/* ---------- trigger ---------- */
-function trigger(p, when, opts){
+/* ---------- one voice, works in live OR offline contexts ---------- */
+function schedVoice(ctx, dest, pad, t, opts){
   opts = opts || {};
-  const pad = pads[p];
-  if(!pad.buffer) return;
-  const ctx = audio();
-  const t = when || ctx.currentTime;
-
-  if(pad.mono || opts.audition) stopPad(p, t);
+  if(!pad.buffer) return null;
 
   const src = ctx.createBufferSource();
   let buf = pad.buffer;
@@ -411,7 +434,6 @@ function trigger(p, when, opts){
   const g = ctx.createGain();
   const peak = pad.level * (opts.velocity == null ? 1 : opts.velocity);
   const att  = Math.min(pad.attack, real*0.5);
-
   g.gain.setValueAtTime(0.0001, t);
   g.gain.linearRampToValueAtTime(peak, t + att);
 
@@ -420,10 +442,9 @@ function trigger(p, when, opts){
   let stopAt = null;
 
   if(looping){
-    src.loop = true;
-    src.loopStart = off;
-    src.loopEnd = off + dur;
+    src.loop = true; src.loopStart = off; src.loopEnd = off + dur;
     src.start(t, off);
+    if(opts.until != null) src.stop(opts.until);
   }else{
     stopAt = t + real;
     if(pad.decay > 0){
@@ -435,35 +456,53 @@ function trigger(p, when, opts){
       g.gain.linearRampToValueAtTime(0.0001, stopAt);
     }
     src.start(t, Math.max(0, off), dur);
-    if(!pad.hold) src.stop(stopAt + 0.02);
+    if(!pad.hold || opts.offline) src.stop(stopAt + 0.02);
   }
 
-  src.connect(g); g.connect(master);
+  src.connect(g); g.connect(dest);
+  return {src, g, looping, real};
+}
 
-  const voice = {src, g};
+/* cut a voice short — used for mono, live and offline */
+function cutVoice(v, t){
+  try{
+    if(v.g.gain.cancelAndHoldAtTime) v.g.gain.cancelAndHoldAtTime(t);
+    else v.g.gain.cancelScheduledValues(t);
+  }catch(e){ try{ v.g.gain.cancelScheduledValues(t); }catch(e2){} }
+  try{
+    v.g.gain.linearRampToValueAtTime(0.0001, t + 0.012);
+    v.src.stop(t + 0.04);
+  }catch(e){}
+}
+
+function trigger(p, when, opts){
+  opts = opts || {};
+  const pad = pads[p];
+  if(!pad.buffer) return;
+  const ctx = audio();
+  const t = when || ctx.currentTime;
+
+  if(pad.mono || opts.audition) stopPad(p, t);
+
+  const voice = schedVoice(ctx, master, pad, t, opts);
+  if(!voice) return;
+
   pad.voices.push(voice);
-  src.onended = () => {
+  voice.src.onended = () => {
     const i = pad.voices.indexOf(voice);
     if(i > -1) pad.voices.splice(i,1);
-    if(looping) refreshLoopDots();
+    if(voice.looping) refreshLoopDots();
   };
 
-  flashPad(p, looping ? 0.25 : real);
-  if(looping) refreshLoopDots();
+  flashPad(p, voice.looping ? 0.25 : voice.real);
+  if(voice.looping) refreshLoopDots();
 }
 
 function stopPad(p, when){
   const pad = pads[p];
   if(!pad.voices.length) return;
   const t = when || audio().currentTime;
-  pad.voices.forEach(v => {
-    try{
-      v.g.gain.cancelScheduledValues(t);
-      v.g.gain.setValueAtTime(v.g.gain.value, t);
-      v.g.gain.linearRampToValueAtTime(0.0001, t + 0.012);
-      v.src.stop(t + 0.04);
-    }catch(e){}
-  });
+  pad.voices.forEach(v => cutVoice(v, t));
   pad.voices = [];
   refreshLoopDots();
 }
@@ -495,10 +534,10 @@ const KITS = {
          ["Kick S",.32],["Snare S",.2],["Shaker",.12],["Crash S",1.0]]
 };
 
-function renderOffline(dur, build){
+function renderOffline(dur, build, channels){
   const sr = (AC && AC.sampleRate) || 44100;
   const OC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
-  const oc = new OC(1, Math.max(64, Math.ceil(sr*dur)), sr);
+  const oc = new OC(channels || 1, Math.max(64, Math.ceil(sr*dur)), sr);
   build(oc, dur);
   const r = oc.startRendering();
   if(r && r.then) return r;
@@ -645,6 +684,7 @@ async function loadKit(kit){
     pads[p].title = name;
     pads[p].artist = "TR-" + kit;
     pads[p].drum = true;
+    pads[p].kit = kit; pads[p].voice = name;
     pads[p].end = buf.duration;
     pads[p].level = 0.85;
     drawPads();
@@ -665,7 +705,8 @@ async function bootKit(){
       const buf = await renderOffline(dur, (oc,d) => synth(oc, d, "808", name));
       const p = target*16 + i;
       pads[p].buffer = buf; pads[p].title = name; pads[p].artist = "TR-808";
-      pads[p].drum = true; pads[p].end = buf.duration; pads[p].level = 0.85;
+      pads[p].drum = true; pads[p].kit = "808"; pads[p].voice = name;
+      pads[p].end = buf.duration; pads[p].level = 0.85;
     }catch(e){ return; }
   }
   drawPads();
@@ -743,6 +784,7 @@ async function loadToPad(p, t){
     pads[p].title = t.trackName || "Untitled";
     pads[p].artist = t.artistName || "";
     pads[p].art = t.artworkUrl100 || "";
+    pads[p].src = t.previewUrl;
     pads[p].spotify = "https://open.spotify.com/search/" +
       encodeURIComponent(((t.artistName||"") + " " + (t.trackName||"")).trim());
     pads[p].end = buf.duration;
@@ -920,7 +962,8 @@ $("#fitOff").addEventListener("click", () => { pads[sel].rate = 1; syncPanel(); 
 function snapshot(p){
   const s = pads[p];
   return { buffer:s.buffer, title:s.title, artist:s.artist, art:s.art, spotify:s.spotify,
-           drum:s.drum, start:s.start, end:s.end, pitch:s.pitch, rate:s.rate,
+           drum:s.drum, src:s.src, kit:s.kit, voice:s.voice,
+           start:s.start, end:s.end, pitch:s.pitch, rate:s.rate,
            level:s.level, attack:s.attack, decay:s.decay };
 }
 
@@ -957,7 +1000,7 @@ $("#spreadKeys").addEventListener("click", () => {
     pads[p].steps = keep;
     Object.assign(pads[p], s);
     pads[p].pitch = Math.max(-24, Math.min(24, s.pitch + i));
-    pads[p].title = s.title + " " + (i >= 0 ? "+" : "") + i;
+    pads[p].title = s.title + (i ? " +" + i : "");
     pads[p]._rev = null;
   }
   sel = bank*16;
@@ -1139,6 +1182,250 @@ addEventListener("keyup", e => {
   const slot = KEYMAP.indexOf(k);
   if(slot >= 0){ const p = idx(slot); if(pads[p].hold && !pads[p].loop) stopPad(p); }
 });
+
+/* ============================================================
+   RECORD & SAVE
+   ============================================================ */
+const takesEl = $("#takes");
+const takes = [];
+
+function addTake(name, blob, ext){
+  const url = URL.createObjectURL(blob);
+  takes.unshift({name, url, ext, size: blob.size});
+  drawTakes();
+}
+function drawTakes(){
+  takesEl.innerHTML = "";
+  takes.slice(0, 8).forEach(t => {
+    const row = document.createElement("div");
+    row.className = "take";
+    const kb = t.size > 1048576 ? (t.size/1048576).toFixed(1) + " MB" : Math.round(t.size/1024) + " KB";
+    row.innerHTML = '<span class="nm"></span>' +
+                    '<audio controls preload="none"></audio>' +
+                    '<a>Save</a>';
+    row.querySelector(".nm").textContent = t.name + " · " + kb;
+    row.querySelector("audio").src = t.url;
+    const a = row.querySelector("a");
+    a.download = t.name;
+    a.href = t.url;
+    takesEl.appendChild(row);
+  });
+}
+
+/* ---------- live capture of everything you hear ---------- */
+let recDest = null, mediaRec = null, chunks = [], capturing = false, capMime = "";
+const MR = window.MediaRecorder;
+if(!MR) $("#bCap").disabled = true;
+
+function pickMime(){
+  const list = ["audio/webm;codecs=opus","audio/webm","audio/mp4","audio/ogg;codecs=opus"];
+  for(const m of list){ if(MR.isTypeSupported && MR.isTypeSupported(m)) return m; }
+  return "";
+}
+function extFor(m){
+  if(m.indexOf("mp4") > -1) return "m4a";
+  if(m.indexOf("ogg") > -1) return "ogg";
+  return "webm";
+}
+function startCapture(){
+  const ctx = audio();
+  if(!recDest){ recDest = ctx.createMediaStreamDestination(); master.connect(recDest); }
+  chunks = [];
+  capMime = pickMime();
+  try{
+    mediaRec = capMime ? new MR(recDest.stream, {mimeType:capMime}) : new MR(recDest.stream);
+  }catch(e){ setStatus("This browser won't capture audio. Use Bounce instead."); return; }
+  capMime = mediaRec.mimeType || capMime || "audio/webm";
+  mediaRec.ondataavailable = e => { if(e.data && e.data.size) chunks.push(e.data); };
+  mediaRec.onstop = () => {
+    const ext = extFor(capMime);
+    const blob = new Blob(chunks, {type: capMime});
+    if(blob.size) addTake("crate-take-" + stamp() + "." + ext, blob, ext);
+  };
+  mediaRec.start(250);
+  capturing = true;
+  $("#bCap").classList.add("armed");
+  $("#bCap").textContent = "■ Stop capture";
+}
+function stopCapture(){
+  if(mediaRec && mediaRec.state !== "inactive") mediaRec.stop();
+  capturing = false;
+  $("#bCap").classList.remove("armed");
+  $("#bCap").textContent = "● Capture";
+}
+$("#bCap").addEventListener("click", () => capturing ? stopCapture() : startCapture());
+
+/* ---------- offline bounce of the sequence to WAV ---------- */
+function encodeWav(buf){
+  const nch = buf.numberOfChannels, len = buf.length, sr = buf.sampleRate;
+  const total = 44 + len*nch*2;
+  const dv = new DataView(new ArrayBuffer(total));
+  let o = 0;
+  const str = t => { for(let i=0;i<t.length;i++) dv.setUint8(o++, t.charCodeAt(i)); };
+  const u32 = v => { dv.setUint32(o, v, true); o += 4; };
+  const u16 = v => { dv.setUint16(o, v, true); o += 2; };
+  str("RIFF"); u32(total-8); str("WAVE");
+  str("fmt "); u32(16); u16(1); u16(nch); u32(sr); u32(sr*nch*2); u16(nch*2); u16(16);
+  str("data"); u32(len*nch*2);
+  const ch = [];
+  for(let c=0;c<nch;c++) ch.push(buf.getChannelData(c));
+  for(let i=0;i<len;i++){
+    for(let c=0;c<nch;c++){
+      const v = Math.max(-1, Math.min(1, ch[c][i]));
+      dv.setInt16(o, v < 0 ? v*0x8000 : v*0x7fff, true); o += 2;
+    }
+  }
+  return new Blob([dv.buffer], {type:"audio/wav"});
+}
+
+let bouncing = false;
+async function bounce(bars){
+  if(bouncing) return;
+  const any = pads.some(p => p.buffer && p.steps.some(Boolean));
+  if(!any){ setStatus("Nothing sequenced yet. Put some steps in first."); return; }
+  bouncing = true;
+  audio();
+  setStatus("Bouncing " + bars + " bar" + (bars>1?"s":"") + "…");
+
+  const sd     = 60 / bpm / 4;
+  const nSteps = bars * 16;
+  const bodyT  = nSteps * sd;
+  const dur    = bodyT + 3;                       // room for tails to ring out
+
+  try{
+    const buf = await renderOffline(dur, oc => {
+      const out = oc.createGain();
+      out.gain.value = master ? master.gain.value : 0.85;
+      out.connect(oc.destination);
+      const last = {};
+      for(let n=0; n<nSteps; n++){
+        const i = n % 16;
+        const t = n*sd + (i % 2 === 1 ? sd*(swing/100) : 0);
+        for(let p=0; p<NPADS; p++){
+          const pad = pads[p];
+          if(!pad.buffer || !pad.steps[i]) continue;
+          if(pad.mono && last[p]) cutVoice(last[p], t);
+          const v = schedVoice(oc, out, pad, t, {offline:true, until: bodyT});
+          if(v) last[p] = v;
+        }
+      }
+      Object.keys(last).forEach(k => { if(last[k].looping) cutVoice(last[k], bodyT); });
+    }, 2);
+
+    addTake("crate-" + bars + "bar-" + bpm + "bpm-" + stamp() + ".wav", encodeWav(buf), "wav");
+    resultsEl.classList.remove("open");
+  }catch(e){
+    setStatus("Bounce failed. Try fewer bars.");
+  }
+  bouncing = false;
+}
+$("#bnc1").addEventListener("click", () => bounce(1));
+$("#bnc2").addEventListener("click", () => bounce(2));
+$("#bnc4").addEventListener("click", () => bounce(4));
+$("#bnc8").addEventListener("click", () => bounce(8));
+
+/* ---------- save / load the whole machine ---------- */
+function stamp(){
+  const d = new Date(), z = n => String(n).padStart(2,"0");
+  return z(d.getHours()) + z(d.getMinutes()) + z(d.getSeconds());
+}
+function projectJSON(){
+  return {
+    app:"the-crate", version:2, bpm, swing,
+    master: master ? master.gain.value : 0.85,
+    pads: pads.map(p => {
+      if(!p.buffer) return p.steps.some(Boolean) ? {steps:p.steps.slice()} : null;
+      return { src:p.src, kit:p.kit, voice:p.voice, title:p.title, artist:p.artist,
+               spotify:p.spotify, art:p.art, drum:p.drum,
+               start:p.start, end:p.end, pitch:p.pitch, rate:p.rate, level:p.level,
+               attack:p.attack, decay:p.decay, reverse:p.reverse, hold:p.hold,
+               loop:p.loop, mono:p.mono, steps:p.steps.slice() };
+    })
+  };
+}
+$("#bSave").addEventListener("click", () => {
+  const blob = new Blob([JSON.stringify(projectJSON(), null, 1)], {type:"application/json"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "the-crate-" + bpm + "bpm-" + stamp() + ".json";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+});
+
+$("#bLoad").addEventListener("click", () => $("#fileIn").click());
+$("#fileIn").addEventListener("change", async e => {
+  const f = e.target.files && e.target.files[0];
+  e.target.value = "";
+  if(!f) return;
+  let data;
+  try{ data = JSON.parse(await f.text()); }
+  catch(err){ setStatus("That file isn't a Crate project."); return; }
+  if(!data || data.app !== "the-crate"){ setStatus("That file isn't a Crate project."); return; }
+  await loadProject(data);
+});
+
+async function loadProject(data){
+  stopAll(); stop();
+  audio();
+
+  bpm = data.bpm || 90;   $("#bpm").value = bpm;   $("#vBpm").textContent = bpm + " bpm";
+  swing = data.swing || 0; $("#swing").value = swing; $("#vSwing").textContent = swing + "%";
+  if(data.master != null && master){
+    master.gain.value = data.master;
+    $("#vol").value = Math.round(data.master*100);
+    $("#vVol").textContent = Math.round(data.master*100);
+  }
+
+  for(let p=0; p<NPADS; p++) pads[p] = blankPad();
+
+  const list = data.pads || [];
+  let done = 0, need = list.filter(x => x && (x.kit || x.src)).length;
+
+  for(let p=0; p<Math.min(list.length, NPADS); p++){
+    const d = list[p];
+    if(!d) continue;
+    const pad = pads[p];
+    if(d.steps) pad.steps = d.steps.slice(0,16);
+    if(!d.kit && !d.src) continue;
+
+    Object.assign(pad, {
+      src:d.src||"", kit:d.kit||"", voice:d.voice||"", title:d.title||"", artist:d.artist||"",
+      spotify:d.spotify||"", art:d.art||"", drum:!!d.drum,
+      start:d.start||0, end:d.end||0, pitch:d.pitch||0, rate:d.rate||1,
+      level:d.level==null?0.8:d.level, attack:d.attack||0.002, decay:d.decay||0,
+      reverse:!!d.reverse, hold:!!d.hold, loop:!!d.loop, mono:d.mono !== false
+    });
+
+    setStatus("Rebuilding pad " + (p%16+1) + " of bank " + "ABCD"[Math.floor(p/16)] + " (" + (done+1) + "/" + need + ")…");
+    try{
+      if(d.kit && d.voice){
+        const spec = (KITS[d.kit]||[]).find(v => v[0] === d.voice);
+        const len = spec ? spec[1] : 1;
+        pad.buffer = await renderOffline(len, (oc,dd) => synth(oc, dd, d.kit, d.voice));
+      }else if(d.src){
+        const r = await fetch(d.src);
+        if(!r.ok) throw new Error("http");
+        const arr = await r.arrayBuffer();
+        pad.buffer = await new Promise((ok,no) => {
+          const q = AC.decodeAudioData(arr, ok, no);
+          if(q && q.then) q.then(ok,no);
+        });
+      }
+      if(!pad.end || pad.end > pad.buffer.duration) pad.end = pad.buffer.duration;
+      done++;
+    }catch(err){
+      pad.buffer = null;
+      pad.title = (d.title||"?") + " (missing)";
+    }
+    drawPads();
+  }
+
+  sel = 0; setBank(0);
+  drawPads(); syncPanel(); drawWave();
+  const lost = need - done;
+  if(lost > 0) setStatus("Loaded, but " + lost + " sample" + (lost>1?"s":"") + " couldn't be re-fetched.");
+  else resultsEl.classList.remove("open");
+}
 
 /* ============================================================
    CRATE UI + BOOT
