@@ -706,7 +706,9 @@ const TUNED = {BASS:36, KEYS:60};
 function synth(oc, dur, kit, name, at, slot){
   at = at || 0;
   const out = oc.createGain(); out.gain.value = 0.85; out.connect(oc.destination);
-  const osc = (type,f) => { const o = oc.createOscillator(); o.type=type; o.frequency.value=f;
+  const NYQ = oc.sampleRate/2 - 100;
+  const hz  = f => Math.max(8, Math.min(f || 8, NYQ));
+  const osc = (type,f) => { const o = oc.createOscillator(); o.type=type; o.frequency.value=hz(f);
                             o.start(at); o.stop(at+dur); return o; };
   const noise = () => {
     const b = oc.createBuffer(1, Math.ceil(oc.sampleRate*dur)+1, oc.sampleRate);
@@ -714,7 +716,7 @@ function synth(oc, dur, kit, name, at, slot){
     for(let i=0;i<a.length;i++) a[i] = Math.random()*2-1;
     const s = oc.createBufferSource(); s.buffer = b; s.start(at); return s;
   };
-  const filt = (type,f,q) => { const b = oc.createBiquadFilter(); b.type=type; b.frequency.value=f;
+  const filt = (type,f,q) => { const b = oc.createBiquadFilter(); b.type=type; b.frequency.value=hz(f);
                                if(q) b.Q.value=q; return b; };
   const decay = (node, peak, dec, t0) => {
     const s = at + (t0 || 0);
@@ -764,8 +766,8 @@ function synth(oc, dur, kit, name, at, slot){
       const short = name === "Kick S";
       const f0 = is6 ? 170 : is9 ? 200 : 120, f1 = is6 ? 52 : is9 ? 48 : 45;
       const o = osc("sine", f0);
-      o.frequency.setValueAtTime(f0, at);
-      o.frequency.exponentialRampToValueAtTime(f1, at + (is9 ? .035 : is6 ? .03 : .07));
+      o.frequency.setValueAtTime(hz(f0), at);
+      o.frequency.exponentialRampToValueAtTime(hz(f1), at + (is9 ? .035 : is6 ? .03 : .07));
       decay(o, 1, short ? .18 : is6 ? .3 : is9 ? .42 : .85);
       const n = noise(), hp = filt("highpass", is9 ? 2500 : is6 ? 3200 : 1200);
       n.connect(hp); decay(hp, is9 ? .45 : is6 ? .4 : .16, is9 ? .012 : .009);
@@ -813,8 +815,8 @@ function synth(oc, dur, kit, name, at, slot){
     case "Conga L": case "Conga M": case "Conga H": {
       const f = TUNE[name];
       const o = osc("sine", f*1.6);
-      o.frequency.setValueAtTime(f*1.6, at);
-      o.frequency.exponentialRampToValueAtTime(f, at + .06);
+      o.frequency.setValueAtTime(hz(f*1.6), at);
+      o.frequency.exponentialRampToValueAtTime(hz(f), at + .06);
       decay(o, .8, dur*.85);
       if(is9 || is6){ const n = noise(), hp = filt("highpass",400); n.connect(hp); decay(hp, .1, .07); }
       break;
@@ -862,9 +864,15 @@ async function renderKit(kit){
   const spec = KITS[kit], gap = .06, offs = [];
   let t = 0;
   spec.forEach(v => { offs.push(t); t += v[1] + gap; });
+  const failed = [];
   const big = await renderOffline(t, oc => {
-    spec.forEach((v,i) => synth(oc, v[1], kit, v[0], offs[i], i));
+    spec.forEach((v,i) => {
+      try{ synth(oc, v[1], kit, v[0], offs[i], i); }
+      catch(err){ failed.push(v[0] + " (" + ((err && err.message) || "error") + ")"); }
+    });
   }, 1);
+  if(failed.length) console.warn("Voices that failed to render:", failed);
+  renderKit.lastFailed = failed;
   const sr = big.sampleRate, src = big.getChannelData(0);
   return spec.map((v,i) => {
     const a = Math.floor(offs[i]*sr), len = Math.max(1, Math.ceil(v[1]*sr));
@@ -877,8 +885,36 @@ async function renderKit(kit){
 }
 
 let kitBusy = false;
+function bankHasAudio(b){
+  for(let i=0;i<16;i++) if(pads[b*16+i].buffer) return true;
+  return false;
+}
+function firstEmptyBank(){
+  for(let b=0;b<4;b++) if(!bankHasAudio(b)) return b;
+  return -1;
+}
+let overwriteArmed = null, overwriteTid = null;
+
 async function loadKit(kit){
   if(kitBusy) return;
+
+  /* never drop a kit on top of pads you've already loaded */
+  let target = bank;
+  if(bankHasAudio(bank)){
+    const e = firstEmptyBank();
+    if(e > -1){
+      target = e;
+    }else if(overwriteArmed !== kit){
+      overwriteArmed = kit;
+      clearTimeout(overwriteTid);
+      overwriteTid = setTimeout(() => { overwriteArmed = null; }, 4000);
+      setStatus("All four banks have something in them. Tap " + kit +
+                " again to replace bank " + "ABCD"[bank] + ", or clear a bank first.");
+      return;
+    }
+  }
+  overwriteArmed = null; clearTimeout(overwriteTid);
+
   kitBusy = true;
   audio();
   setStatus("Building " + kit + "…");
@@ -887,7 +923,7 @@ async function loadKit(kit){
     pushUndo();
     const tuned = TUNED[kit] != null;
     voices.forEach((v,i) => {
-      const p = bank*16 + i;
+      const p = target*16 + i;
       stopPad(p);
       const keep = pads[p].steps;
       pads[p] = blankPad();
@@ -898,14 +934,20 @@ async function loadKit(kit){
       pads[p].drum   = !tuned;
       pads[p].tuned  = tuned;
       pads[p].kit = kit; pads[p].voice = v.name;
+      pads[p].tag = tuned ? "" : kit;   /* 808 and 909 share nearly every voice name */
       pads[p].end = v.buffer.duration;
       pads[p].level = 0.85;
     });
-    sel = bank*16;
+    sel = target*16;
+    setBank(target);
     drawPads(); syncPanel(); drawScreen();
-    resultsEl.classList.remove("open");
+    const bad = renderKit.lastFailed || [];
+    if(bad.length) setStatus(kit + " loaded into bank " + "ABCD"[target] +
+                             ", but " + bad.length + " voice" + (bad.length>1?"s":"") +
+                             " came back silent: " + bad.join(", "));
+    else setStatus(kit + " loaded into bank " + "ABCD"[target] + ".");
   }catch(e){
-    setStatus("Couldn't build " + kit + ". Reload the page and try again.");
+    setStatus("Couldn't build " + kit + " — " + ((e && e.message) || "render failed") + ".");
   }finally{
     kitBusy = false;
   }
